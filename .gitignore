@@ -20,3 +20,7 @@ Thumbs.db
 .idea/
 .vscode/
 
+# Avoid committing sensitive planning prompts
+/plan.md
+/prompt.md
+

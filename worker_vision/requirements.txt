@@ -1,0 +1,4 @@
+websockets
+rich
+opencv-python
+numpy

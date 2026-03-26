@@ -17,7 +17,9 @@ pip install -r requirements.txt
 python3 main.py
 ```
 
-依序輸入 server IP 與 port。
+不需要輸入 server IP/port。啟動時會：
+- 先嘗試同機 loopback（`127.0.0.1:8765`、`localhost:8765`）
+- 若同機找不到，改用 Zeroconf 自動搜尋內網 server
 
 ## 行為
 - 背景持續循環讀取 `worker_vision/file` 影片
@@ -49,3 +51,10 @@ python3 main.py
 
 ### 不需要（此階段）
 - 空間定位/座標/其他 metadata（例如 spatial data / localization 等）此階段可不送。
+
+## Resource Monitor
+- `rich` 固定區塊會顯示：
+  - RAM 使用量（平均/峰值）
+  - GPU 使用率（平均/峰值）
+  - VRAM 使用量（平均/峰值）
+- 若沒有 GPU 或 NVML 不可用，會顯示 `No GPU`，不會中斷程式。

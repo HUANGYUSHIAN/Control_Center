@@ -18,13 +18,15 @@ pip install -r requirements.txt
 python3 main.py
 ```
 
-啟動後會印出 `ws://<server-ip>:8765/ws`，前端與 workers 都連這個位址。
+啟動後會印出 `ws://<server-ip>:8765/ws`，並透過 Zeroconf 在內網註冊服務，讓 workers 可自動發現。
 
 ## 功能摘要
 - 接收 frontend 與三個 worker 的 WebSocket 連線
+- 透過 Zeroconf 註冊 server（`_tmui-server._tcp.local.`）
 - 任務狀態推送（等待中/執行中/已完成/失敗）
 - 單一 worker 來源，多 frontend 訂閱的 SFU 轉發
 - 高頻資訊用 `rich` 固定區塊刷新
+- `rich` 固定區塊包含 RAM/GPU/VRAM 使用率（平均/峰值；若無 GPU 會顯示 No GPU）
 
 ## 除錯重點
 - 若 frontend 黑畫面：先看對應 worker 是否在線

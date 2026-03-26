@@ -3,3 +3,6 @@ rich
 pybullet
 opencv-python
 numpy
+zeroconf
+psutil
+nvidia-ml-py3

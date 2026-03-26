@@ -1,2 +1,5 @@
 websockets
 rich
+zeroconf
+psutil
+nvidia-ml-py3

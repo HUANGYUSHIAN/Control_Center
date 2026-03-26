@@ -3,22 +3,55 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import socket
+import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
+import os
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+import psutil
 from rich.console import Console
 from rich.live import Live
 from rich.table import Table
 import uvicorn
+from zeroconf import ServiceInfo
+from zeroconf.asyncio import AsyncZeroconf
+try:
+    import pynvml
+except Exception:  # pragma: no cover - fallback when NVML package missing
+    pynvml = None
 
 from contracts import Event, Role
 
-console = Console()
-app = FastAPI(title="TMUI Server")
+# Rich Live 需攔截 stdout/stderr（預設 True），否則 uvicorn / logging 直接寫終端會移動游標，
+# Live 仍用「上移 N 行」重繪，游標錯位就會疊出多個表格。非 TTY（重導向）時勿強制 terminal。
+console = Console(force_terminal=bool(sys.stdout.isatty()))
+
+
+def _build_server_logger() -> logging.Logger:
+    """將 server 日誌寫檔，避免干擾 Rich Live 單表格刷新。"""
+    logger = logging.getLogger("tmui.server")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    if not logger.handlers:
+        log_path = os.path.join(os.path.dirname(__file__), "server.log")
+        fh = logging.FileHandler(log_path, encoding="utf-8")
+        fh.setFormatter(
+            logging.Formatter(
+                "%(asctime)s %(levelname)s [tmui:%(name)s] %(message)s",
+                datefmt="%H:%M:%S",
+            )
+        )
+        logger.addHandler(fh)
+    logging.getLogger("zeroconf").setLevel(logging.WARNING)
+    return logger
+
+
+_server_log = _build_server_logger()
 
 
 def now_text() -> str:
@@ -53,6 +86,63 @@ class RuntimeStats:
 stats = RuntimeStats()
 live_task: asyncio.Task | None = None
 live: Live | None = None
+SERVICE_TYPE = "_tmui-server._tcp.local."
+
+
+class ResourceMonitor:
+    def __init__(self) -> None:
+        self.samples = 0
+        self.ram_avg = 0.0
+        self.ram_max = 0.0
+        self.gpu_avg = 0.0
+        self.gpu_max = 0.0
+        self.vram_avg = 0.0
+        self.vram_max = 0.0
+        self.gpu_available = False
+        self._pid = os.getpid()
+        self._proc = psutil.Process(self._pid)
+        self._gpu_handle = None
+        if pynvml is not None:
+            try:
+                pynvml.nvmlInit()
+                if pynvml.nvmlDeviceGetCount() > 0:
+                    self._gpu_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+                    self.gpu_available = True
+            except Exception:
+                self.gpu_available = False
+
+    def _update_running_avg(self, prev: float, value: float) -> float:
+        return ((prev * self.samples) + value) / (self.samples + 1)
+
+    def update(self) -> None:
+        rss_mb = self._proc.memory_info().rss / (1024 * 1024)
+        self.ram_avg = self._update_running_avg(self.ram_avg, rss_mb)
+        self.ram_max = max(self.ram_max, rss_mb)
+        if self.gpu_available and self._gpu_handle is not None:
+            try:
+                util = float(pynvml.nvmlDeviceGetUtilizationRates(self._gpu_handle).gpu)
+                mem = pynvml.nvmlDeviceGetMemoryInfo(self._gpu_handle)
+                vram_mb = mem.used / (1024 * 1024)
+                self.gpu_avg = self._update_running_avg(self.gpu_avg, util)
+                self.gpu_max = max(self.gpu_max, util)
+                self.vram_avg = self._update_running_avg(self.vram_avg, vram_mb)
+                self.vram_max = max(self.vram_max, vram_mb)
+            except Exception:
+                self.gpu_available = False
+        self.samples += 1
+
+    def rows(self) -> list[tuple[str, str]]:
+        out = [("RAM MB(avg/max)", f"{self.ram_avg:.1f} / {self.ram_max:.1f}")]
+        if self.gpu_available:
+            out.append(("GPU %(avg/max)", f"{self.gpu_avg:.1f} / {self.gpu_max:.1f}"))
+            out.append(("VRAM MB(avg/max)", f"{self.vram_avg:.1f} / {self.vram_max:.1f}"))
+        else:
+            out.append(("GPU", "No GPU"))
+            out.append(("VRAM", "No GPU"))
+        return out
+
+
+resource_monitor = ResourceMonitor()
 
 
 def build_process_snapshot() -> dict[str, Any]:
@@ -170,14 +260,15 @@ class Hub:
                     self.view_subscribers[payload.get("view", "robot_status")].discard(ws)
             return
         if event == Event.LOG:
-            console.print(f"[cyan][worker:{role}][/cyan] {payload.get('message', '')}")
+            _server_log.info("[worker:%s] %s", role, payload.get("message", ""))
 
 
 hub = Hub()
 
 
 def build_live_table() -> Table:
-    table = Table(title="TMUI 即時狀態（高頻刷新）")
+    resource_monitor.update()
+    table = Table(title="TMUI 即時狀態")
     table.add_column("項目")
     table.add_column("值")
     table.add_row("frontend 連線數", str(stats.connected_frontends))
@@ -189,37 +280,89 @@ def build_live_table() -> Table:
     table.add_row("robot_status 訂閱", str(stats.viewer_count["robot_status"]))
     table.add_row("digital frame", str(stats.frame_count["digital"]))
     table.add_row("camera frame", str(stats.frame_count["camera"]))
+    for k, v in resource_monitor.rows():
+        table.add_row(k, v)
     return table
 
 
 async def live_refresher() -> None:
     global live
-    live = Live(build_live_table(), console=console, refresh_per_second=4)
-    live.start()
+    # get_renderable：每次 refresh 重算表格；勿同時用手動 update + 內建 RefreshThread 雙重刷新。
+    # redirect_* 預設 True，讓 uvicorn / print / logging 經 Rich，與 Live 的游標還原一致。
+    live = Live(
+        get_renderable=build_live_table,
+        console=console,
+        refresh_per_second=4,
+        transient=False,
+        redirect_stdout=True,
+        redirect_stderr=True,
+    )
+    live.start(refresh=True)
     try:
         while True:
-            if live:
-                live.update(build_live_table())
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(0.5)
     finally:
         if live:
             live.stop()
 
 
-@app.on_event("startup")
-async def on_startup() -> None:
+@contextlib.asynccontextmanager
+async def lifespan(app: FastAPI):
     global live_task
     live_task = asyncio.create_task(live_refresher())
-    ip = get_local_ip()
-    console.print(f"[green]Server 啟動完成: ws://{ip}:8765/ws[/green]")
-
-
-@app.on_event("shutdown")
-async def on_shutdown() -> None:
+    async_zc: AsyncZeroconf | None = None
+    try:
+        ip = get_local_ip()
+        hostname = socket.gethostname()
+        _server_log.info(
+            "準備註冊 mDNS：get_local_ip()=%r hostname=%r；"
+            "若 server 在 WSL2，此 IP 常為虛擬網段，其他實體機無法用 mDNS/TCP 連到該位址，"
+            "請在 Windows 上查 Wi‑Fi 的區網 IP 給 worker，或讓 server 跑在原生 Linux/Windows。",
+            ip,
+            hostname,
+        )
+        async_zc = AsyncZeroconf()
+        service_name = f"TMUI-Server-{hostname}.{SERVICE_TYPE}"
+        zc_service = ServiceInfo(
+            SERVICE_TYPE,
+            service_name,
+            addresses=[socket.inet_aton(ip)],
+            port=8765,
+            properties={"path": "/ws".encode()},
+            server=f"{hostname}.local.",
+        )
+        _server_log.info(
+            "mDNS ServiceInfo type=%r name=%r port=%s addresses=%r server=%r",
+            SERVICE_TYPE,
+            service_name,
+            8765,
+            [ip],
+            zc_service.server,
+        )
+        broadcast = await async_zc.async_register_service(zc_service)
+        await broadcast
+        _server_log.info("mDNS 註冊完成，WebSocket: ws://%s:8765/ws", ip)
+        _server_log.info(
+            "Server 啟動完成: ws://%s:8765/ws；Workers 可於任意時間連線（晚於啟動亦可）",
+            ip,
+        )
+    except Exception as exc:
+        _server_log.warning("mDNS 註冊失敗（HTTP/WebSocket 仍會運作）: %s", exc, exc_info=True)
+        if async_zc is not None:
+            with contextlib.suppress(Exception):
+                await async_zc.async_close()
+            async_zc = None
+    yield
     if live_task:
         live_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await live_task
+    if async_zc is not None:
+        with contextlib.suppress(Exception):
+            await async_zc.async_close()
+
+
+app = FastAPI(lifespan=lifespan, title="TMUI Server")
 
 
 @app.websocket("/ws")
@@ -235,7 +378,7 @@ async def ws_entry(ws: WebSocket) -> None:
             return
         role = reg.get("role", "")
         await hub.send_json(ws, {"event": Event.REGISTER_ACK, "role": role})
-        console.print(f"[yellow]接收連線[/yellow] role={role}")
+        _server_log.info("接收 WebSocket 連線 role=%s", role)
 
         if role == Role.FRONTEND:
             hub.frontends.add(ws)
@@ -271,9 +414,9 @@ async def ws_entry(ws: WebSocket) -> None:
             else:
                 await hub.route_worker_payload(role, payload)
     except WebSocketDisconnect:
-        console.print(f"[red]連線中斷[/red] role={role}")
+        _server_log.info("WebSocket 連線中斷 role=%s", role)
     except Exception as exc:
-        console.print(f"[red]處理錯誤[/red] role={role}, error={exc}")
+        _server_log.exception("WebSocket 處理錯誤 role=%s", role)
     finally:
         if role == Role.FRONTEND:
             hub.frontends.discard(ws)
@@ -289,4 +432,12 @@ async def ws_entry(ws: WebSocket) -> None:
 
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8765, reload=False)
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8765,
+        reload=False,
+        log_level="warning",
+        access_log=False,
+        log_config=None,
+    )

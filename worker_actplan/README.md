@@ -17,7 +17,9 @@ pip install -r requirements.txt
 python3 main.py
 ```
 
-依序輸入 server IP 與 port。若無法連線會直接結束。
+不需要輸入 server IP/port。啟動時會：
+- 先嘗試同機 loopback（`127.0.0.1:8765`、`localhost:8765`）
+- 若同機找不到，改用 Zeroconf 自動搜尋內網 server
 
 ## 行為
 - 收到 `command_input` 後等待 2 秒
@@ -41,3 +43,10 @@ python3 main.py
   - `await asyncio.sleep(2)`
   - `reply = text[: len(text) // 2]`
 - 你需要把以上兩段替換成呼叫你的 LLM action planner module（例如 `reply = your_llm(text)`）。
+
+## Resource Monitor
+- `rich` 固定區塊會顯示：
+  - RAM 使用量（平均/峰值）
+  - GPU 使用率（平均/峰值）
+  - VRAM 使用量（平均/峰值）
+- 若沒有 GPU 或 NVML 不可用，會顯示 `No GPU`，不會中斷程式。

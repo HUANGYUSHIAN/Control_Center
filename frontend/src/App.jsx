@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Box,
@@ -22,6 +22,7 @@ import {
   Tab,
   Tabs,
   TextField,
+  Tooltip,
   Typography
 } from "@mui/material";
 import SendIcon from "@mui/icons-material/Send";
@@ -85,7 +86,8 @@ const I18N = {
     initChildActplan: "確認 worker_actplan 連線",
     initChildVision: "確認 worker_vision 連線",
     initChildRobot: "確認 worker_robot 連線",
-    micToggleLabel: "語音輸入"
+    micToggleLabel: "語音輸入",
+    micNotSupported: "此瀏覽器不支援語音辨識（請使用 Chrome / Edge）"
   },
   "en-US": {
     appTitle: "Control Center",
@@ -115,7 +117,8 @@ const I18N = {
     initChildActplan: "Confirm worker_actplan connection",
     initChildVision: "Confirm worker_vision connection",
     initChildRobot: "Confirm worker_robot connection",
-    micToggleLabel: "Voice input"
+    micToggleLabel: "Voice input",
+    micNotSupported: "Speech recognition is not supported in this browser (use Chrome / Edge)"
   },
   "ja-JP": {
     appTitle: "コントロールセンター",
@@ -145,7 +148,8 @@ const I18N = {
     initChildActplan: "worker_actplan の接続確認",
     initChildVision: "worker_vision の接続確認",
     initChildRobot: "worker_robot の接続確認",
-    micToggleLabel: "音声入力"
+    micToggleLabel: "音声入力",
+    micNotSupported: "このブラウザは音声認識に対応していません（Chrome / Edge を使用）"
   }
 };
 
@@ -175,7 +179,105 @@ export default function App() {
   const [selectedSubId, setSelectedSubId] = useState(null);
 
   const wsRef = useRef(null);
-  const { transcript, listening, browserSupportsSpeechRecognition } = useSpeechRecognition();
+  const mediaStreamRef = useRef(null);
+  const audioContextRef = useRef(null);
+  const analyserRef = useRef(null);
+  const rafRef = useRef(null);
+  const [micOn, setMicOn] = useState(false);
+  const [micSound, setMicSound] = useState(false);
+  const micOnRef = useRef(false);
+  const { transcript, browserSupportsSpeechRecognition } = useSpeechRecognition();
+  micOnRef.current = micOn;
+
+  const stopLevelMonitor = useCallback(() => {
+    if (rafRef.current != null) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+    analyserRef.current = null;
+    if (audioContextRef.current) {
+      void audioContextRef.current.close();
+      audioContextRef.current = null;
+    }
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach((t) => t.stop());
+      mediaStreamRef.current = null;
+    }
+    setMicSound(false);
+  }, []);
+
+  const startLevelMonitor = useCallback(async () => {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    mediaStreamRef.current = stream;
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    const ctx = new Ctx();
+    audioContextRef.current = ctx;
+    const source = ctx.createMediaStreamSource(stream);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    analyser.smoothingTimeConstant = 0.35;
+    source.connect(analyser);
+    analyserRef.current = analyser;
+
+    const buf = new Uint8Array(analyser.fftSize);
+    const tick = () => {
+      const node = analyserRef.current;
+      if (!node) return;
+      node.getByteTimeDomainData(buf);
+      let sum = 0;
+      for (let i = 0; i < buf.length; i++) {
+        const v = (buf[i] - 128) / 128;
+        sum += v * v;
+      }
+      const rms = Math.sqrt(sum / buf.length);
+      setMicSound(rms > 0.035);
+      rafRef.current = requestAnimationFrame(tick);
+    };
+    rafRef.current = requestAnimationFrame(tick);
+  }, []);
+
+  const handleMicToggle = async () => {
+    if (!browserSupportsSpeechRecognition) {
+      pushLog("command", texts.micNotSupported, "warning");
+      return;
+    }
+    if (micOn) {
+      await SpeechRecognition.stopListening();
+      stopLevelMonitor();
+      setMicOn(false);
+      return;
+    }
+    try {
+      await startLevelMonitor();
+      await SpeechRecognition.startListening({ continuous: true, language: lang });
+      setMicOn(true);
+    } catch (e) {
+      stopLevelMonitor();
+      void SpeechRecognition.stopListening().catch(() => {});
+      pushLog("command", `麥克風: ${e?.message || String(e)}`, "error");
+    }
+  };
+
+  // 僅在「語言」變更且麥克風已開啟時重啟辨識（用 ref 讀 micOn，避免依賴 micOn 造成開麥時多一次 stop/start）
+  useEffect(() => {
+    if (!micOnRef.current) return;
+    let cancelled = false;
+    void (async () => {
+      await SpeechRecognition.stopListening();
+      if (cancelled) return;
+      await SpeechRecognition.startListening({ continuous: true, language: lang });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [lang]);
+
+  useEffect(() => {
+    return () => {
+      void SpeechRecognition.stopListening();
+      stopLevelMonitor();
+    };
+  }, [stopLevelMonitor]);
 
   const wsUrl = useMemo(() => {
     const host = window.location.hostname || "127.0.0.1";
@@ -349,7 +451,12 @@ export default function App() {
     ws.send(JSON.stringify({ event: Event.COMMAND_INPUT, text }));
     setChatMessages((prev) => [...prev, { role: "user", text }]);
     setChatInput("");
-    SpeechRecognition.stopListening();
+    void (async () => {
+      await SpeechRecognition.stopListening();
+      stopLevelMonitor();
+      setMicOn(false);
+      setMicSound(false);
+    })();
     pushLog("command", `送出指令: ${text}`);
   };
 
@@ -644,15 +751,27 @@ export default function App() {
               InputProps={{
                 endAdornment: (
                   <InputAdornment position="end">
-                    <IconButton
-                      onClick={() => {
-                        if (!browserSupportsSpeechRecognition) return;
-                        if (listening) SpeechRecognition.stopListening();
-                        else SpeechRecognition.startListening({ continuous: true, language: lang });
-                      }}
-                    >
-                      {listening ? <MicOffIcon /> : <MicIcon />}
-                    </IconButton>
+                    <Tooltip title={browserSupportsSpeechRecognition ? texts.micToggleLabel : texts.micNotSupported}>
+                      <span>
+                        <IconButton
+                          disabled={!browserSupportsSpeechRecognition}
+                          onClick={() => void handleMicToggle()}
+                          sx={{
+                            borderRadius: "50%",
+                            bgcolor: micOn && micSound ? ACCENT : "transparent",
+                            color:
+                              micOn && micSound ? "#fff" : micOn ? "primary.main" : "action.disabled",
+                            transition: "background-color 0.06s ease",
+                            "&:hover": {
+                              bgcolor: micOn && micSound ? "#659a28" : "action.hover"
+                            },
+                            "&.Mui-disabled": { opacity: 0.45 }
+                          }}
+                        >
+                          {micOn ? <MicIcon /> : <MicOffIcon />}
+                        </IconButton>
+                      </span>
+                    </Tooltip>
                     <IconButton onClick={sendCommand}>
                       <SendIcon />
                     </IconButton>

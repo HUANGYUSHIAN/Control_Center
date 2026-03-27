@@ -707,14 +707,18 @@ export default function App() {
             )}
             {activeView === "robot_status" && (
               <List dense sx={{ maxHeight: 300, overflowY: "auto" }}>
-              {robotJointNames.length === 0 ? (
+              {Math.max(robotJointNames.length, robotJointAngles.length) === 0 ? (
                 <ListItem>
                   <ListItemText primary={texts.robotStatusNone} />
                 </ListItem>
                 ) : (
-                  robotJointNames.map((name, i) => (
-                    <ListItem key={name}>
-                      <ListItemText primary={`${name}: ${(robotJointAngles[i] || 0).toFixed(3)}`} />
+                  Array.from(
+                    { length: Math.max(robotJointNames.length, robotJointAngles.length) },
+                    (_, i) => (
+                    <ListItem key={`${robotJointNames[i] || "joint"}-${i}`}>
+                      <ListItemText
+                        primary={`${robotJointNames[i] || `joint_${i}`}: ${(Number(robotJointAngles[i]) || 0).toFixed(3)}`}
+                      />
                     </ListItem>
                   ))
                 )}

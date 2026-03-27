@@ -21,17 +21,25 @@ def configure_logging(component: str) -> logging.Logger:
     global _log_configured
     log = logging.getLogger(f"tmui.{component}")
     debug_en = os.environ.get("TMUI_DEBUG", "").strip().lower() in ("1", "true", "yes")
+    level = logging.DEBUG if debug_en else logging.INFO
     if not _log_configured:
-        level = logging.DEBUG if debug_en else logging.INFO
-        if not logging.root.handlers:
-            logging.basicConfig(
-                level=level,
-                format="%(asctime)s %(levelname)s [tmui:%(name)s] %(message)s",
-                datefmt="%H:%M:%S",
-            )
         logging.getLogger("zeroconf").setLevel(logging.WARNING)
         _log_configured = True
-    log.setLevel(logging.DEBUG if debug_en else logging.INFO)
+    log.setLevel(level)
+    log.propagate = False
+    if not log.handlers:
+        log_dir = os.environ.get("TMUI_LOG_DIR", "").strip() or os.getcwd()
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, f"{component}.log")
+        fh = logging.FileHandler(log_path, encoding="utf-8")
+        fh.setLevel(level)
+        fh.setFormatter(
+            logging.Formatter(
+                "%(asctime)s %(levelname)s [tmui:%(name)s] %(message)s",
+                datefmt="%H:%M:%S",
+            )
+        )
+        log.addHandler(fh)
     return log
 
 

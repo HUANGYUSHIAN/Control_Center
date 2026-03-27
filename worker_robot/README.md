@@ -1,15 +1,17 @@
 # worker_robot
 
 ## 建議環境
-- Python `3.10` 或 `3.11`
+- 使用你已可成功執行 `isaac_main.py` 的 Isaac Sim Python 環境
+- 不要覆蓋既有 Isaac / OpenCV 套件版本
 
 ## 安裝
 ```bash
 cd /mnt/c/Users/huang/Desktop/TMUI/worker_robot
-python3 -m venv .venv
+# 啟用你既有可跑 Isaac 的環境（範例）
 source .venv/bin/activate
-python -m pip install --upgrade pip
-pip install -r requirements.txt
+
+# 只補「缺少」的 TMUI 通訊套件，不要動既有 isaac/opencv 版本
+python -c "import websockets,rich,zeroconf,psutil" || pip install websockets rich zeroconf psutil nvidia-ml-py3
 ```
 
 ## 啟動
@@ -21,13 +23,16 @@ python3 main.py
 - 先嘗試同機 loopback（`127.0.0.1:8765`、`localhost:8765`）
 - 若同機找不到，改用 Zeroconf 自動搜尋內網 server
 
-## 行為
-- 使用 PyBullet headless (DIRECT) 載入 `plane.urdf` 與 `franka_panda/panda.urdf`
-- 模擬時間持續推進，且每 5 秒更新一次隨機目標關節角
-- `digital` 訂閱時以 FPS=10 傳送模擬畫面
-- `robot_status` 訂閱時先送關節名稱，後續以固定頻率更新角度
+## 行為（Isaac Sim）
+- 使用 `isaac_main.py` 同一套場景與機器人來源：
+  - `World + ground plane`
+  - `Unitree A1`（`/Isaac/Robots/Unitree/A1/a1.usd`）
+  - 相機在 `/World/camera`
+- `digital` 訂閱時傳送壓縮影像（預設較低負載：`320x320`, JPEG quality `45`, 約 `4 FPS`）
+- `robot_status` 訂閱時先送一次 joints，再以較低頻率更新角度（約 `2 Hz`）
+- 不寫影像檔案、不在終端列印關節明細；終端以 rich 狀態表為主，持續運行不設時限
 
-## I/O（請用 Isaac Sim humanoid robot 串接取代）
+## I/O
 
 ### Input（由 TMUI server 送入）
 - WebSocket JSON：
@@ -50,14 +55,13 @@ python3 main.py
     - `view`: `"robot_status"`
     - `angles`: `[...angles...]`
 
-### Replace（何處要替換）
-- 目前模擬/渲染/關節讀取都在 `worker_robot/main.py` 內：
-  - PyBullet 模擬：`sim_loop`、`randomize_targets`、`apply_targets`
-  - 畫面渲染：`capture_frame`
-  - 關節角度讀取：`get_joint_values`
-- 你應該改成你的 Isaac Sim 人形機器人：
-  - 讀取 articulation/joint angles
-  - 從相機或 render 取得影像並回填 `frame.image`
+### 備註
+- 目前 `main.py` 已改為 Isaac Sim 版本（不再使用 PyBullet）。
+- 若要調整傳輸負載，可在 `main.py` 內調整：
+  - `DIGITAL_FPS`
+  - `FRAME_SIZE`
+  - `JPEG_QUALITY`
+  - `STATUS_HZ`
 
 ## Resource Monitor
 - `rich` 固定區塊會顯示：

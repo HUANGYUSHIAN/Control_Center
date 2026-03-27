@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sys
 from datetime import datetime
 import os
@@ -25,6 +26,7 @@ if str(_TMUI_ROOT) not in sys.path:
 from tmui_discovery import resolve_server_endpoint  # noqa: E402
 
 state = {"requests": 0, "replies": 0, "server": "N/A"}
+_log = logging.getLogger("tmui.worker_actplan")
 
 
 def now_text() -> str:
@@ -96,7 +98,7 @@ def build_table() -> Table:
 
 async def run(ip: str, port: str) -> None:
     uri = f"ws://{ip}:{port}/ws"
-    console.print(f"[cyan]{now_text()}[/cyan] 連線到 {uri}")
+    _log.info("連線到 %s", uri)
     try:
         async with websockets.connect(uri) as ws:
             # ================================
@@ -115,14 +117,14 @@ async def run(ip: str, port: str) -> None:
             # Replace that mock section with your real LLM action planner module.
             await ws.send(json.dumps({"event": "register", "role": "worker_actplan"}, ensure_ascii=False))
             ack = json.loads(await ws.recv())
-            console.print(f"[green]{now_text()}[/green] 註冊成功: {ack}")
+            _log.info("註冊成功: %s", ack)
 
             while True:
                 data = json.loads(await ws.recv())
                 if data.get("event") != "command_input":
                     continue
                 text = data.get("text", "")
-                console.print(f"[yellow]{now_text()}[/yellow] 收到請求: {text}")
+                _log.info("收到請求")
                 state["requests"] += 1
 
                 # -----------------------------
@@ -143,16 +145,16 @@ async def run(ip: str, port: str) -> None:
                         ensure_ascii=False,
                     )
                 )
-                console.print(f"[green]{now_text()}[/green] 已回覆: {reply}")
+                _log.info("已回覆（長度=%s）", len(reply))
                 state["replies"] += 1
     except Exception as exc:
-        console.print(f"[red]{now_text()}[/red] 連線失敗或中斷: {exc}")
+        _log.exception("連線失敗或中斷: %s", exc)
 
 
 if __name__ == "__main__":
     server_ip, server_port = resolve_server_endpoint("worker_actplan")
     state["server"] = f"{server_ip}:{server_port}"
-    console.print(f"[cyan]{now_text()}[/cyan] 使用 server -> {state['server']}")
+    _log.info("使用 server -> %s", state["server"])
 
     live = Live(build_table(), console=console, refresh_per_second=4)
     live.start()

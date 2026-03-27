@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import sys
 from datetime import datetime
 import os
@@ -30,6 +31,7 @@ from tmui_discovery import resolve_server_endpoint  # noqa: E402
 state = {"subscribers": 0, "source_ok": False, "frame_count": 0}
 latest_frame: np.ndarray | None = None
 state["server"] = "N/A"
+_log = logging.getLogger("tmui.worker_vision")
 
 
 class ResourceMonitor:
@@ -167,7 +169,7 @@ async def run(ip: str, port: str) -> None:
         async with ws_conn as ws:
             await ws.send(json.dumps({"event": "register", "role": "worker_vision"}, ensure_ascii=False))
             await ws.recv()
-            console.print(f"[green]{now_text()}[/green] worker_vision 註冊成功")
+            _log.info("worker_vision 註冊成功")
 
             send_enabled = False
 
@@ -200,10 +202,10 @@ async def run(ip: str, port: str) -> None:
             finally:
                 send_task.cancel()
     except TimeoutError:
-        console.print(f"[red]{now_text()}[/red] 連線逾時：{uri}")
-        console.print(
-            "[yellow]請確認 server IP 是否可達。若 server 跑在 WSL，172.x.x.x 通常只在該主機內可用，"
-            "其他實體機請改用 Windows 主機內網 IP（例如 192.168.x.x）。[/yellow]"
+        _log.error("連線逾時：%s", uri)
+        _log.warning(
+            "請確認 server IP 是否可達。若 server 跑在 WSL，172.x.x.x 通常只在該主機內可用，"
+            "其他實體機請改用 Windows 主機內網 IP（例如 192.168.x.x）。"
         )
         raise
 
@@ -211,7 +213,7 @@ async def run(ip: str, port: str) -> None:
 if __name__ == "__main__":
     server_ip, server_port = resolve_server_endpoint("worker_vision")
     state["server"] = f"{server_ip}:{server_port}"
-    console.print(f"[cyan]{now_text()}[/cyan] 使用 server -> {state['server']}")
+    _log.info("使用 server -> %s", state["server"])
     loop = asyncio.get_event_loop()
     loop.create_task(playback_loop())
     live = Live(build_table(), console=console, refresh_per_second=4)
